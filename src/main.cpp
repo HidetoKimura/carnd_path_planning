@@ -8,7 +8,7 @@
 #include "Eigen-3.3/Eigen/Core"
 #include "Eigen-3.3/Eigen/QR"
 #include "json.hpp"
-
+#include "spline.h"
 using namespace std;
 
 // for convenience
@@ -159,6 +159,79 @@ vector<double> getXY(double s, double d, vector<double> maps_s, vector<double> m
 
 }
 
+int getLane(double d) 
+{
+  return (int)( d / 4.0);
+}
+
+double getFrenetCenter(int lane) 
+{
+  return (double)(lane * 4.0 + 2.0);
+}
+
+
+int getClosestCarInfo(json sensor_fusion, int lane, bool check_back, int N, \
+                      double &dist, double &speed)
+{
+  int closest = -1;
+  double colsest_dist = 10000.0;
+  double start_dist, end_dist;
+
+  for(int i = 0; i < sensor_fusion.size(); i++) {
+    float other_d = sensor_fusion[i][6];
+    int other_lane = getLane(other_d);
+    if (lane == other_lane ) {
+      double vx = sensor_fusion[i][3];
+      double vy = sensor_fusion[i][4];
+      double check_speed = sqrt(vx*vx+vy*vy);
+      double check_car_s = sensor_fusion[i][5];
+      double add_dist = ((double)N*.02*check_speed);
+      start_dist = fabs(check_car_s - car_s);
+      end_dist = fabs(check_car_s + add_dist - car_s);
+      if(end_dist < start_dist) {
+         start_dist = end_dist;
+      }
+      double update_enable = false;
+      if(car_s < check_car_s) { // front
+        update_enabkle = true;
+      }
+      else if(car_s >= check_car_s && check_back) { // back
+        update_enabkle = true;
+      }
+      if(start_dist < closest_dist) {
+        closest_dist = start_dist;
+        closest = i;
+        speed = check_speed;
+        dist = start_dist;
+      }  
+    }
+  }
+  return closest;
+}
+double getCostByChangeLane()
+{
+  return 100.0
+}
+double getCostByNoChangeLane()
+{
+  return 200.0;
+} 
+double getCostByDist(double dist)
+{
+  if(dist < 10.0) {
+    return 500.0;
+  }
+  return 0.0;
+} 
+
+double getCostBySpeed(double dist, double oth_speed, double ego_speed)
+{
+  if(dist < 30.0 && fabs(oth_speed - ego_speed) > 10.0) {
+    return 250.0;
+  }
+  return 0.0;
+} 
+
 int main() {
   uWS::Hub h;
 
@@ -196,8 +269,17 @@ int main() {
     map_waypoints_dy.push_back(d_y);
   }
 
-  h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
-                     uWS::OpCode opCode) {
+  // start in lane 1
+  int lane = 1;
+
+  // have a reference velocity to target
+  double ref_vel = 0; // mph
+  double max_vel = 49.50;
+
+  h.onMessage([&lane, &ref_vel, &max_vel,\
+      &map_waypoints_x,&map_waypoints_y,\
+      &map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy]\
+      (uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
     // The 2 signifies a websocket event
@@ -240,34 +322,112 @@ int main() {
             }
 
             bool too_close = false;
-            double closest_speed = max_vel;
-
-            for (int i = 0; i < sensor_fusion.size(); i++) {
-              float other_d = sensor_fusion[i][6];
-
-              // see if the vehicle is in my lane
-              int other_lane = LaneFrenet(other_d);
-              if (other_lane < 0 || other_lane > 2)
-                continue;
-
-              int ego_lane = LaneFrenet(end_path_d);
-              if (lane == other_lane ) {
-                double vx = sensor_fusion[i][3];
-                double vy = sensor_fusion[i][4];
-                double check_speed = sqrt(vx*vx+vy*vy);
-                double check_car_s = sensor_fusion[i][5];
-
-                check_car_s+=((double)prev_size*.02*check_speed);
-                // check s values greater (its ahead) and less than 30 gap
-                if (check_car_s > car_s && check_car_s-car_s < 30)
-                {
-                  too_close = true;
-                  closest_speed = check_speed;
+            int target_lane = lane;
+            int check_id = -1;
+            double check_dist = -1.0;
+            double check_speed = -1.0;
+            double target_cardist = -1.0;
+            double target_carspeed = -1.0;
+            double ego_speed = car_speed / 2.24;
+            double cost[3] = {0.0, 0.0 ,0.0};
+  
+            for(int idx_lane = 0; idx_lane < 3; i++) {
+              if(lane == idx_lane) {
+                check_id = getClosestCarInfo(sensor_fusion, idx_lane, false,\
+                            prev_size, check_dist, check_speed);
+                if(check_id != -1) {
+                  target_cardist = check_dist;
+                  target_carspeed = check_speed;
+                  if(target_cardist < 25.0) {
+                    too_close = true;
+                    cost[idx_lane] += getCostByNoChangeLane();
+                  } 
+                }
+              }
+              else {
+                 check_id = getClosestCarInfo(sensor_fusion, idx_lane, true,\
+                            prev_size, check_dist, check_speed);
+                if(check_id != -1) {
+                    cost[idx_lane] += getCostByChangeLane();
+                    cost[idx_lane] += getCostBySpeed(check_dist, check_speed, ego_speed);
+                    cost[idx_lane] += getCostByDist(check_dist);
                 }
               }
             }
 
-            if(too_close)
+            bool change_lane = false;
+            else if(lane == 0 && cost[0] > cost[1]) {
+              change_lane = true;
+              target_lane = 1;
+            }
+            else if(lane == 1 && cost[1] > cost[2]) {
+              change_lane = true;
+              target_lane = 2;
+            }
+            else if(lane == 1 && cost[1] > cost[0]) {
+              change_lane = true;
+              target_lane = 0;
+            }
+            else if(lane == 2 && cost[2] > cost[1]) {
+              change_lane = true;
+              target_lane = 1;
+            }
+
+            if(change_lane && ego_speed > 10.0) {
+              change_lane = false;
+              check_id = getClosestCarInfo(sensor_fusion, target_lane, false,\
+                          prev_size, check_dist, check_speed);
+              if(check_id != -1) {
+                double diff_speed = check_speed - ego_speed;
+                if(check_dist > 50.0) {
+                  change_lane = true;
+                }
+                else if(check_dist > 20.0 && diff_speed > 0.0 ) {
+                  change_lane = true;  
+                }
+                else {
+                  change_lane = false;
+                }
+              }
+              else {
+                change_lane = true;
+              }
+              if(change_lane) {
+                lane = target_lane;
+              }
+            }
+
+            if(target_speed > 0.0) { 
+              double diff_speed = ego_speed - target_speed;
+              if(too_close && diff_speed > 0.0) {
+                if(target_cardist < 10.0 && diff_speed < 3.0) {
+                  ref_vel -= 2.24 / 4;
+                }
+                if(target_cardist < 10.0 && diff_speed < 6.0) {
+                   ref_vel -= 2.24 / 2;
+                }
+                else {
+                   ref_vel -= 2.24 / 1;
+                }
+              }
+              else {
+                if(target_cardist > 10.0 && diff_speed > -3.0) {
+                  ref_vel += 2.24 / 4;
+                }
+                else if(target_cardist > 10.0 && diff_speed > -6.0) {
+                   ref_vel -= 2.24 / 2;
+                }
+                else if (ref_vel < max_vel) {
+                   ref_vel += 2.24 / 1;
+                }
+              }
+            }
+            else if (ref_vel < max_vel)  
+            {
+              ref_vel += .224 * 2.0;
+            }
+
+            if(too_close && diff_speed)
             {
               ref_vel -= .224;
             }
