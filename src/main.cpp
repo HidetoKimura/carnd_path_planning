@@ -427,15 +427,6 @@ int main() {
               ref_vel += .224 * 2.0;
             }
 
-            if(too_close && diff_speed)
-            {
-              ref_vel -= .224;
-            }
-            else if (ref_vel < max_vel)  
-            {
-              ref_vel += .224;
-            }
-
             vector<double> ptsx;
             vector<double> ptsy;
 
