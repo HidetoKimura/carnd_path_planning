@@ -3,7 +3,150 @@ Self-Driving Car Engineer Nanodegree Program
 
 ### Model Documentation
 
-This model was based on the walkthrough video.
+This model is based on the walkthrough video. The use of spline has been quite useful.
+I describe the difference from the walkthrough video mainly.
+
+The following function is used to detect the nearest vehicle by the sensor fusion data, lane and car_s.
+~~~~
+getClosestCarInfo()
+~~~~
+
+The following function is used to calculate the cost for lane change, inter-vehicle distance and other vehicle speed.
+The higher the cost, the more dangerous it is, it won't do the lane change. As a result of trial and error, it has the following values.
+
+~~~~
+getCostByChangeLane() [Cost += 100]
+getCostByNoChangeLane() [Cost =+200]
+getCostByDist() [Cost +=500]
+getCostBySpeed() [Cost +=250]
+~~~~
+
+After acquiring own vehicle information and fusion data, it check each lane.
+In case of own lane, it check the distance between the car and the preceding car and judge whether to change lanes.
+In case of another lanes, it add the cost with the above function.
+
+main.cpp L.350
+~~~~
+for(int idx_lane = 0; idx_lane < 3; idx_lane++) {
+              if(lane == idx_lane) { // my lane
+                // check only front car
+                check_id = getClosestCarInfo(sensor_fusion, idx_lane, car_s, false,\
+                            prev_size, check_dist, check_speed, check_s);
+                if(check_id != -1) {
+                  target_cardist = check_dist;
+                  if(target_cardist < 25.0) {
+                    too_close = true;
+                    cost[idx_lane] += getCostByNoChangeLane();
+                  } 
+                }
+              }
+              else { // other lane
+                // check both front and back car
+                 check_id = getClosestCarInfo(sensor_fusion, idx_lane, car_s, true,\
+                            prev_size, check_dist, check_speed, check_s);
+                if(check_id != -1) {
+                    cost[idx_lane] += getCostByChangeLane();
+                    cost[idx_lane] += getCostBySpeed(check_dist, check_speed, ego_speed);
+                    cost[idx_lane] += getCostByDist(check_dist);
+                }
+              }
+            }
+~~~~
+
+It check if it can actually change the lane.
+
+L.387
+~~~~
+            bool change_lane = false;
+            if(lane == 0 && cost[0] > cost[1]) {
+              change_lane = true;
+              target_lane = 1;
+            }
+            else if(lane == 1 && cost[1] > cost[2]) {
+              change_lane = true;
+              target_lane = 2;
+            }
+            else if(lane == 1 && cost[1] > cost[0]) {
+              change_lane = true;
+              target_lane = 0;
+            }
+            else if(lane == 2 && cost[2] > cost[1]) {
+              change_lane = true;
+              target_lane = 1;
+            }
+~~~~
+
+It check the lane change after checking if there is enough distance between the vehicle ahead and the lane change.
+
+L.406
+~~~~
+            if(change_lane && ego_speed > 10.0) {
+              change_lane = false;
+              // check front car in changing lane.
+              check_id = getClosestCarInfo(sensor_fusion, target_lane, car_s, false,\
+                          prev_size, check_dist, check_speed, check_s);
+              if(check_id != -1) { // exist a front car.
+                double diff_speed = check_speed - ego_speed;
+                if(check_dist > 50.0) {
+                  change_lane = true;
+                }
+                else if(check_dist > 20.0 && diff_speed > 0.0 ) {
+                  change_lane = true;  
+                }
+                else { // too near.
+                  change_lane = false;
+                }
+              }
+              else { // no car
+                change_lane = true;
+              }
+              if(change_lane) {
+                lane = target_lane;
+                cout << "change lane =" << lane << endl;
+              }
+            }
+~~~~
+
+When it is in a traffic jam, it try to run according to the speed of the car as far as it can.
+
+L.432
+~~~~
+            if(target_cardist > 0.0 && target_cardist < 100.0) { // exist a front car 
+              double diff_speed = ego_speed - target_carspeed;
+              if(too_close && ref_vel > .224 && diff_speed > 0.0) {
+                if(target_cardist < 10.0 && diff_speed < 3.0) {
+                  ref_vel -= .224 / 4;
+                  cout << "[brake low] speed = " << ref_vel << endl;
+                }
+                if(target_cardist < 10.0 && diff_speed < 6.0) {
+                  ref_vel -= .224 / 2;
+                  cout << "[brake mid] speed = " << ref_vel  << endl;
+                }
+                else {
+                  ref_vel -= .224 / 1;
+                  cout << "[brake high] speed = " << ref_vel << endl;
+                }
+              }
+              else if(ref_vel < max_vel) {
+                if(target_cardist < 10.0 && 
+                   (diff_speed < 0.0 && diff_speed > -3.0)) {
+                  ref_vel += .224 / 4;
+                  cout << "[accelerate low] speed = " << ref_vel << endl;
+                }
+                else if(target_cardist < 10.0 && 
+                  (diff_speed <= -3.0 && diff_speed > -6.0)) {
+                  ref_vel -= .224 / 2;
+                  cout << "[accelerate mid] speed = " << ref_vel << endl;
+                }
+                else {
+                  ref_vel += .224 / 1;
+                  cout << "[accelerate high] speed = " << ref_vel << endl;
+                }
+              }
+            }
+~~~~
+
+About 30 minutes or so, it was able to run with no accident. Just the accident happened when the car approached from behind at high speed. This is a future task.
 
 ### Simulator.
 You can download the Term3 Simulator which contains the Path Planning Project from the [releases tab (https://github.com/udacity/self-driving-car-sim/releases).
