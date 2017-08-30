@@ -135,6 +135,9 @@ vector<double> getFrenet(double x, double y, double theta, vector<double> maps_x
 vector<double> getXY(double s, double d, vector<double> maps_s, vector<double> maps_x, vector<double> maps_y)
 {
   int prev_wp = -1;
+  const double max_s = 6945.554;
+  
+  if( s > max_s) s -= max_s;
 
   while(s > maps_s[prev_wp+1] && (prev_wp < (int)(maps_s.size()-1) ))
   {
@@ -159,23 +162,25 @@ vector<double> getXY(double s, double d, vector<double> maps_s, vector<double> m
 
 }
 
+// Transform Frenet d to lane .
 int getLane(double d) 
 {
   return (int)( d / 4.0);
 }
 
+// Transfrom lane to Frenet d center.
 double getFrenetCenter(int lane) 
 {
   return (double)(lane * 4.0 + 2.0);
 }
-
-
-int getClosestCarInfo(json sensor_fusion, int lane, bool check_back, int N, \
-                      double &dist, double &speed)
+// Get closest car infomation by lane  and car_s.
+int getClosestCarInfo(json sensor_fusion, int lane, double &car_s, bool check_back, \
+                      int N, double &dist, double &speed, double &s)
 {
   int closest = -1;
-  double colsest_dist = 10000.0;
+  double closest_dist = 10000.0;
   double start_dist, end_dist;
+  const double max_s = 6945.554;
 
   for(int i = 0; i < sensor_fusion.size(); i++) {
     float other_d = sensor_fusion[i][6];
@@ -187,30 +192,41 @@ int getClosestCarInfo(json sensor_fusion, int lane, bool check_back, int N, \
       double check_car_s = sensor_fusion[i][5];
       double add_dist = ((double)N*.02*check_speed);
       start_dist = fabs(check_car_s - car_s);
+      if(start_dist > 6000.0) {
+        if(check_car_s > car_s) {
+          car_s += max_s;
+        }
+        else {
+          check_car_s += max_s;
+        }
+      }
       end_dist = fabs(check_car_s + add_dist - car_s);
       if(end_dist < start_dist) {
          start_dist = end_dist;
       }
       double update_enable = false;
       if(car_s < check_car_s) { // front
-        update_enabkle = true;
+        update_enable = true;
       }
       else if(car_s >= check_car_s && check_back) { // back
-        update_enabkle = true;
+        update_enable = true;
       }
-      if(start_dist < closest_dist) {
+      if(start_dist < closest_dist && update_enable) {
         closest_dist = start_dist;
         closest = i;
         speed = check_speed;
         dist = start_dist;
+        s = check_car_s;
       }  
     }
   }
   return closest;
 }
+
+// get cost functions
 double getCostByChangeLane()
 {
-  return 100.0
+  return 100.0;
 }
 double getCostByNoChangeLane()
 {
@@ -226,7 +242,7 @@ double getCostByDist(double dist)
 
 double getCostBySpeed(double dist, double oth_speed, double ego_speed)
 {
-  if(dist < 30.0 && fabs(oth_speed - ego_speed) > 10.0) {
+  if(dist < 30.0 && fabs(oth_speed - ego_speed) > 5.0) {
     return 250.0;
   }
   return 0.0;
@@ -276,7 +292,7 @@ int main() {
   double ref_vel = 0; // mph
   double max_vel = 49.50;
 
-  h.onMessage([&lane, &ref_vel, &max_vel,\
+  h.onMessage([&lane, &ref_vel, &max_vel, \
       &map_waypoints_x,&map_waypoints_y,\
       &map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy]\
       (uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, uWS::OpCode opCode) {
@@ -326,27 +342,34 @@ int main() {
             int check_id = -1;
             double check_dist = -1.0;
             double check_speed = -1.0;
+            double check_s = -1.0;
             double target_cardist = -1.0;
             double target_carspeed = -1.0;
             double ego_speed = car_speed / 2.24;
             double cost[3] = {0.0, 0.0 ,0.0};
   
-            for(int idx_lane = 0; idx_lane < 3; i++) {
-              if(lane == idx_lane) {
-                check_id = getClosestCarInfo(sensor_fusion, idx_lane, false,\
-                            prev_size, check_dist, check_speed);
+            for(int idx_lane = 0; idx_lane < 3; idx_lane++) {
+              if(lane == idx_lane) { // my lane
+                // check only front car
+                check_id = getClosestCarInfo(sensor_fusion, idx_lane, car_s, false,\
+                            prev_size, check_dist, check_speed, check_s);
                 if(check_id != -1) {
                   target_cardist = check_dist;
                   target_carspeed = check_speed;
+                  cout << "my car_s = " << car_s << " | " \
+                       << "target car_s = " << check_s << ", " \
+                       << "dist = " << check_dist << ", " \
+                       << "speed = " << check_speed * 2.24 << endl;
                   if(target_cardist < 25.0) {
                     too_close = true;
                     cost[idx_lane] += getCostByNoChangeLane();
                   } 
                 }
               }
-              else {
-                 check_id = getClosestCarInfo(sensor_fusion, idx_lane, true,\
-                            prev_size, check_dist, check_speed);
+              else { // other lane
+                // check both front and back car
+                 check_id = getClosestCarInfo(sensor_fusion, idx_lane, car_s, true,\
+                            prev_size, check_dist, check_speed, check_s);
                 if(check_id != -1) {
                     cost[idx_lane] += getCostByChangeLane();
                     cost[idx_lane] += getCostBySpeed(check_dist, check_speed, ego_speed);
@@ -355,8 +378,14 @@ int main() {
               }
             }
 
+            if(target_cardist > 0.0) {
+              cout << "cost = " << cost[0] << ", " << cost[1] << ", " \
+                  << cost[2] << endl;
+            }
+
+            // check costs to determine the lane.
             bool change_lane = false;
-            else if(lane == 0 && cost[0] > cost[1]) {
+            if(lane == 0 && cost[0] > cost[1]) {
               change_lane = true;
               target_lane = 1;
             }
@@ -373,11 +402,13 @@ int main() {
               target_lane = 1;
             }
 
+            // if my car run over 22.4mph, it won't change a lane.
             if(change_lane && ego_speed > 10.0) {
               change_lane = false;
-              check_id = getClosestCarInfo(sensor_fusion, target_lane, false,\
-                          prev_size, check_dist, check_speed);
-              if(check_id != -1) {
+              // check front car in changing lane.
+              check_id = getClosestCarInfo(sensor_fusion, target_lane, car_s, false,\
+                          prev_size, check_dist, check_speed, check_s);
+              if(check_id != -1) { // exist a front car.
                 double diff_speed = check_speed - ego_speed;
                 if(check_dist > 50.0) {
                   change_lane = true;
@@ -385,45 +416,54 @@ int main() {
                 else if(check_dist > 20.0 && diff_speed > 0.0 ) {
                   change_lane = true;  
                 }
-                else {
+                else { // too near.
                   change_lane = false;
                 }
               }
-              else {
+              else { // no car
                 change_lane = true;
               }
               if(change_lane) {
                 lane = target_lane;
+                cout << "change lane =" << lane << endl;
               }
             }
 
-            if(target_speed > 0.0) { 
-              double diff_speed = ego_speed - target_speed;
-              if(too_close && diff_speed > 0.0) {
+            if(target_cardist > 0.0 && target_cardist < 100.0) { // exist a front car 
+              double diff_speed = ego_speed - target_carspeed;
+              if(too_close && ref_vel > .224 && diff_speed > 0.0) {
                 if(target_cardist < 10.0 && diff_speed < 3.0) {
-                  ref_vel -= 2.24 / 4;
+                  ref_vel -= .224 / 4;
+                  cout << "[brake low] speed = " << ref_vel << endl;
                 }
                 if(target_cardist < 10.0 && diff_speed < 6.0) {
-                   ref_vel -= 2.24 / 2;
+                  ref_vel -= .224 / 2;
+                  cout << "[brake mid] speed = " << ref_vel  << endl;
                 }
                 else {
-                   ref_vel -= 2.24 / 1;
+                  ref_vel -= .224 / 1;
+                  cout << "[brake high] speed = " << ref_vel << endl;
                 }
               }
-              else {
-                if(target_cardist > 10.0 && diff_speed > -3.0) {
-                  ref_vel += 2.24 / 4;
+              else if(ref_vel < max_vel) {
+                if(target_cardist < 10.0 && 
+                   (diff_speed < 0.0 && diff_speed > -3.0)) {
+                  ref_vel += .224 / 4;
+                  cout << "[accelerate low] speed = " << ref_vel << endl;
                 }
-                else if(target_cardist > 10.0 && diff_speed > -6.0) {
-                   ref_vel -= 2.24 / 2;
+                else if(target_cardist < 10.0 && 
+                  (diff_speed <= -3.0 && diff_speed > -6.0)) {
+                  ref_vel -= .224 / 2;
+                  cout << "[accelerate mid] speed = " << ref_vel << endl;
                 }
-                else if (ref_vel < max_vel) {
-                   ref_vel += 2.24 / 1;
+                else {
+                  ref_vel += .224 / 1;
+                  cout << "[accelerate high] speed = " << ref_vel << endl;
                 }
               }
             }
             else if (ref_vel < max_vel)  
-            {
+            { // no front car
               ref_vel += .224 * 2.0;
             }
 
@@ -466,7 +506,7 @@ int main() {
               ptsy.push_back(ref_y);
             }
 
-            int lane_d = FrenetLaneCenter(lane);
+            int lane_d = getFrenetCenter(lane);
             vector<double> next_wp0 = getXY(car_s+30,lane_d,map_waypoints_s, map_waypoints_x, map_waypoints_y );
             vector<double> next_wp1 = getXY(car_s+60,lane_d,map_waypoints_s, map_waypoints_x, map_waypoints_y );
             vector<double> next_wp2 = getXY(car_s+90,lane_d,map_waypoints_s, map_waypoints_x, map_waypoints_y );
@@ -531,9 +571,6 @@ int main() {
               next_x_vals.push_back(x_point);
               next_y_vals.push_back(y_point);
             }
-
-            vector<double> next_x_vals;
-            vector<double> next_y_vals;
 
             json msgJson;
             msgJson["next_x"] = next_x_vals;
